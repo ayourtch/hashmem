@@ -1,5 +1,8 @@
 use bincode;
 use std::fs::File;
+use rand;
+use rand::Rng;
+
 
 use serde::{Deserialize, Serialize};
 use sha256::{digest, try_digest};
@@ -31,16 +34,18 @@ struct TokenHitHash {
     hits_by_hash: HashMap<String, TokenHits>,
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug)]
 struct TokenStash {
     prefix: String,
     cache: HashMap<String, TokenHitHash>,
+    rng: rand::ThreadRng,
 }
 
 impl TokenStash {
     fn new(prefix: &str) -> Self {
         let prefix = prefix.to_string();
         TokenStash {
+            rng: rand::thread_rng(),
             prefix,
             cache: HashMap::new(),
         }
@@ -223,25 +228,60 @@ impl TokenStash {
             }
         }
     }
+
+    fn predict_all_string_return(&mut self, input: &str, context: usize) -> Option<char> {
+        for i in (0..context).rev() {
+            if input.len() > i {
+                let v = self.predict_token(&input[input.len() - 1 - i..]);
+                if v.len() > 0 {
+                    debug!("Predicted  {:?} at length {}", &v, i);
+
+                    if let Token::C(c) = v[self.rng.gen_range(0, v.len())].value {
+                       return Some(c);
+                       break;
+                    }
+                }
+            }
+        }
+        return None
+    }
+    fn generate(&mut self, input: &str, context: usize) {
+        let mut content = format!("{}", input);
+        print!("{}", input);
+        loop {
+            if let Some(c) = self.predict_all_string_return(&content, 64) {
+                print!("{}", c);
+                content = format!("{}{}", &content, c);
+            } else {
+                println!("\n\n");
+                return;
+            }
+        }
+    }
 }
 
 fn main() {
     env_logger::init();
     debug!("this is a debug {}", "message");
+        let mut rng = rand::thread_rng();
+
     let mut stash = TokenStash::new("data");
 
     match std::env::args().nth(1).unwrap().as_str() {
         "note" => {
-            stash.note_text(&std::env::args().nth(2).unwrap(), 16);
+            stash.note_text(&std::env::args().nth(2).unwrap(), 64);
         }
         "note-file" => {
             let fname = std::env::args().nth(2).unwrap();
             eprintln!("Noting {}...", &fname);
             let data = std::fs::read_to_string(&fname).unwrap();
-            stash.note_text(&data, 16);
+            stash.note_text(&data, 64);
         }
         "predict" => {
-            stash.predict_all_string(&std::env::args().nth(2).unwrap(), 16);
+            stash.predict_all_string(&std::env::args().nth(2).unwrap(), 64);
+        }
+        "generate" => {
+            stash.generate(&std::env::args().nth(2).unwrap(), 64);
         }
         x => {
             panic!("{} is not a valid operation", x);
