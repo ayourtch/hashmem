@@ -1,7 +1,11 @@
 use bincode;
+use std::fs::File;
+
 use serde::{Deserialize, Serialize};
 use sha256::{digest, try_digest};
+use std::collections::HashMap;
 use std::io::{Read, Write};
+
 #[macro_use]
 extern crate log;
 
@@ -17,9 +21,14 @@ struct TokenEntry {
     count: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 struct TokenHits {
     entries: Vec<TokenEntry>,
+}
+
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+struct TokenHitHash {
+    hits_by_hash: HashMap<String, TokenHits>,
 }
 
 fn tokenize(src: &str) -> Vec<Token> {
@@ -33,33 +42,34 @@ fn hash_tokens(src: &[Token]) -> String {
 
 fn get_file_name(tokens: &[Token]) -> String {
     let v = hash_tokens(tokens);
-    let fname = format!(
-        "data/{}/{}",
-        &v[0..3],
-        &v[3..]
-    );
+    let fname = format!("data/{}/{}", &v[0..3], &v[3..]);
     fname
 }
 
-fn read_hits_from_file(filename: &str) -> TokenHits {
+fn read_hits_from_file(hash: &str) -> TokenHits {
     use std::fs::File;
+    let filename = format!("data/{}/hash-{}.bin", &hash[0..3], &hash[0..3]);
 
     if let Ok(mut f) = File::open(&filename) {
         let metadata = std::fs::metadata(&filename).expect("unable to read metadata");
         let mut buffer = vec![0; metadata.len() as usize];
         f.read(&mut buffer).expect("buffer overflow");
-        let decoded: TokenHits = bincode::deserialize(&buffer[..]).unwrap();
-        decoded
+        let decoded: TokenHitHash = bincode::deserialize(&buffer[..]).unwrap();
+        if let Some(decoded) = decoded.hits_by_hash.get(hash) {
+            decoded.clone()
+        } else {
+            TokenHits { entries: vec![] }
+        }
     } else {
         TokenHits { entries: vec![] }
     }
 }
 
-fn write_hits_to_file(hits: &TokenHits, fname: &str) {
-    let encoded: Vec<u8> = bincode::serialize(&hits).unwrap();
+fn write_hits_to_file(hits: &TokenHits, hash: &str) {
+    let filename = format!("data/{}/hash-{}.bin", &hash[0..3], &hash[0..3]);
 
     // Create all the directories in the path if they don't exist
-    if let Some(parent_dir) = std::path::Path::new(fname).parent() {
+    if let Some(parent_dir) = std::path::Path::new(&filename).parent() {
         if !parent_dir.exists() {
             if let Err(err) = std::fs::create_dir_all(parent_dir) {
                 eprintln!("Failed to create directories: {}", err);
@@ -68,7 +78,23 @@ fn write_hits_to_file(hits: &TokenHits, fname: &str) {
         }
     }
 
-    let mut file = match std::fs::File::create(fname) {
+    let mut hashtable: TokenHitHash = if let Ok(mut f) = File::open(&filename) {
+        let metadata = std::fs::metadata(&filename).expect("unable to read metadata");
+        let mut buffer = vec![0; metadata.len() as usize];
+        f.read(&mut buffer).expect("buffer overflow");
+        let decoded: TokenHitHash = bincode::deserialize(&buffer[..]).unwrap();
+        decoded
+    } else {
+        Default::default()
+    };
+
+    hashtable
+        .hits_by_hash
+        .insert(hash.to_string(), hits.clone());
+
+    let encoded: Vec<u8> = bincode::serialize(&hashtable).unwrap();
+
+    let mut file = match std::fs::File::create(filename) {
         Ok(file) => file,
         Err(err) => {
             eprintln!("Failed to open file: {}", err);
@@ -84,9 +110,9 @@ fn write_hits_to_file(hits: &TokenHits, fname: &str) {
 }
 
 fn note_next_token(current: &[Token], next: &Token) {
-    let fname = get_file_name(current);
-    let mut hits = read_hits_from_file(&fname);
-    debug!("current: {:?} next: {:?}, fname: {}", current, next, &fname);
+    let hash = hash_tokens(current);
+    let mut hits = read_hits_from_file(&hash);
+    debug!("current: {:?} next: {:?}, hash: {}", current, next, &hash);
     debug!("Hits B4: {:?}", &hits);
     let mut found = false;
     for mut e in &mut hits.entries {
@@ -103,14 +129,14 @@ fn note_next_token(current: &[Token], next: &Token) {
         hits.entries.push(entry);
     }
     debug!("Hits AF: {:?}", &hits);
-    write_hits_to_file(&hits, &fname);
+    write_hits_to_file(&hits, &hash);
 }
 
 fn get_next_candidates(current: &[Token]) -> Vec<TokenEntry> {
     let mut v: Vec<TokenEntry> = vec![];
-    let fname = get_file_name(current);
-    debug!("input: {:?} fname: {}", &current, &fname);
-    let mut hits = read_hits_from_file(&fname);
+    let hash = hash_tokens(current);
+    debug!("input: {:?} hash: {}", &current, &hash);
+    let mut hits = read_hits_from_file(&hash);
     debug!("hits: {:?}", &hits);
     hits.entries
 }
