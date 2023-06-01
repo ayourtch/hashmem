@@ -1,8 +1,7 @@
 use bincode;
-use std::fs::File;
 use rand;
 use rand::Rng;
-
+use std::fs::File;
 
 use serde::{Deserialize, Serialize};
 use sha256::{digest, try_digest};
@@ -90,7 +89,22 @@ impl TokenStash {
         }
     }
 
+    fn get_random_cache_key(&mut self) -> String {
+        let klen = self.cache.keys().len();
+        let killkey = self.cache.keys().nth(self.rng.gen_range(0, klen)).unwrap();
+        killkey.clone()
+    }
+
     fn save_hash(&mut self, hashtable: &TokenHitHash, filename: &str) {
+        let klen = self.cache.keys().len();
+        if klen > 1000 {
+            let killkey = self.get_random_cache_key();
+            info!("flushing key {}", &killkey);
+            if let Some(hash) = self.cache.get(&killkey) {
+                self.save_hash_on_disk(&hash, &killkey);
+            }
+            self.cache.remove(&killkey);
+        }
         self.cache.insert(filename.to_string(), hashtable.clone());
     }
     fn save_hash_on_disk(self: &Self, hashtable: &TokenHitHash, filename: &str) {
@@ -184,7 +198,6 @@ impl TokenStash {
 
     fn note_string(&mut self, input: &str) {
         let input_tokenized = self.tokenize(&input);
-        info!("NOTE: '{}'", input);
         debug!("Tokenized: {:?}", &input_tokenized);
         self.note_next_token(
             &input_tokenized[0..input_tokenized.len() - 1],
@@ -237,13 +250,13 @@ impl TokenStash {
                     debug!("Predicted  {:?} at length {}", &v, i);
 
                     if let Token::C(c) = v[self.rng.gen_range(0, v.len())].value {
-                       return Some(c);
-                       break;
+                        return Some(c);
+                        break;
                     }
                 }
             }
         }
-        return None
+        return None;
     }
     fn generate(&mut self, input: &str, context: usize) {
         let mut content = format!("{}", input);
@@ -263,7 +276,7 @@ impl TokenStash {
 fn main() {
     env_logger::init();
     debug!("this is a debug {}", "message");
-        let mut rng = rand::thread_rng();
+    let mut rng = rand::thread_rng();
 
     let mut stash = TokenStash::new("data");
 
