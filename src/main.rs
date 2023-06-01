@@ -79,7 +79,16 @@ impl TokenStash {
         }
     }
 
-    fn save_hash(self: &Self, hashtable: &TokenHitHash, filename: &str) {
+    fn flush_cache(&mut self) {
+        for (name, ht) in &self.cache {
+            self.save_hash_on_disk(&ht, &name);
+        }
+    }
+
+    fn save_hash(&mut self, hashtable: &TokenHitHash, filename: &str) {
+        self.cache.insert(filename.to_string(), hashtable.clone());
+    }
+    fn save_hash_on_disk(self: &Self, hashtable: &TokenHitHash, filename: &str) {
         let encoded: Vec<u8> = bincode::serialize(&hashtable).unwrap();
 
         // Create all the directories in the path if they don't exist
@@ -107,7 +116,10 @@ impl TokenStash {
         }
     }
 
-    fn read_hash(self: &Self, filename: &str) -> TokenHitHash {
+    fn read_hash(&mut self, filename: &str) -> TokenHitHash {
+        if let Some(hashtable) = self.cache.get(filename) {
+            return hashtable.clone();
+        }
         let mut hashtable: TokenHitHash = if let Ok(mut f) = File::open(&filename) {
             let metadata = std::fs::metadata(&filename).expect("unable to read metadata");
             let mut buffer = vec![0; metadata.len() as usize];
@@ -117,10 +129,11 @@ impl TokenStash {
         } else {
             Default::default()
         };
+        self.cache.insert(filename.to_string(), hashtable.clone());
         hashtable
     }
 
-    fn write_hits_to_file(self: &Self, hits: &TokenHits, hash: &str) {
+    fn write_hits_to_file(&mut self, hits: &TokenHits, hash: &str) {
         let filename = self.get_hash_file_name(&hash);
 
         let mut hashtable = self.read_hash(&filename);
@@ -132,7 +145,7 @@ impl TokenStash {
         self.save_hash(&hashtable, &filename);
     }
 
-    fn note_next_token(self: &Self, current: &[Token], next: &Token) {
+    fn note_next_token(&mut self, current: &[Token], next: &Token) {
         let hash = self.hash_tokens(current);
         let mut hits = self.read_hits_from_file(&hash);
         debug!("current: {:?} next: {:?}, hash: {}", current, next, &hash);
@@ -164,8 +177,9 @@ impl TokenStash {
         hits.entries
     }
 
-    fn note_string(&self, input: &str) {
+    fn note_string(&mut self, input: &str) {
         let input_tokenized = self.tokenize(&input);
+        info!("NOTE: '{}'", input);
         debug!("Tokenized: {:?}", &input_tokenized);
         self.note_next_token(
             &input_tokenized[0..input_tokenized.len() - 1],
@@ -173,7 +187,7 @@ impl TokenStash {
         );
     }
 
-    fn note_all_string(&self, input: &str, context: usize) {
+    fn note_all_string(&mut self, input: &str, context: usize) {
         for i in 0..context {
             if input.len() > 1 + i {
                 self.note_string(&input[input.len() - 2 - i..])
@@ -181,7 +195,7 @@ impl TokenStash {
         }
     }
 
-    fn note_text(&self, input: &str, context: usize) {
+    fn note_text(&mut self, input: &str, context: usize) {
         for i in 2..input.len() {
             self.note_all_string(&input[0..i], context);
         }
@@ -233,4 +247,5 @@ fn main() {
             panic!("{} is not a valid operation", x);
         }
     }
+    stash.flush_cache();
 }
