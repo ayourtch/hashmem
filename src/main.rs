@@ -77,6 +77,8 @@ fn test_db() {
 
     let mut options = Options::new();
     options.create_if_missing = true;
+    options.cache = Some(leveldb::database::cache::Cache::new(1024*1024));
+    options.compression = leveldb_sys::Compression::Snappy;
     let mut database: Database<DbKey> = match Database::open(path, options) {
         Ok(db) => db,
         Err(e) => {
@@ -301,19 +303,19 @@ fn main() {
 
     match std::env::args().nth(1).unwrap().as_str() {
         "note" => {
-            stash.note_text(&std::env::args().nth(2).unwrap(), 64);
+            stash.note_text(&std::env::args().nth(2).unwrap(), 32);
         }
         "note-file" => {
             let fname = std::env::args().nth(2).unwrap();
             eprintln!("Noting {}...", &fname);
             let data = std::fs::read_to_string(&fname).unwrap();
-            stash.note_text(&data, 64);
+            stash.note_text(&data, 32);
         }
         "predict" => {
-            stash.predict_all_string(&std::env::args().nth(2).unwrap(), 64);
+            stash.predict_all_string(&std::env::args().nth(2).unwrap(), 32);
         }
         "generate" => {
-            stash.generate(&std::env::args().nth(2).unwrap(), 64);
+            stash.generate(&std::env::args().nth(2).unwrap(), 32);
         }
         "test" => {
             test_db();
