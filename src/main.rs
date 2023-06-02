@@ -8,8 +8,16 @@ use sha256::{digest, try_digest};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 
+use db_key;
+
+extern crate leveldb;
+
 #[macro_use]
 extern crate log;
+
+use leveldb::database::Database;
+use leveldb::kv::KV;
+use leveldb::options::{Options, ReadOptions, WriteOptions};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 enum Token {
@@ -33,22 +41,100 @@ struct TokenHitHash {
     hits_by_hash: HashMap<String, TokenHits>,
 }
 
-#[derive(Debug)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+struct DbKey {
+    key: Vec<u8>,
+}
+
 struct TokenStash {
     prefix: String,
+    database: Database<DbKey>,
     cache: HashMap<String, TokenHitHash>,
     rng: rand::ThreadRng,
 }
 
+impl db_key::Key for DbKey {
+    fn from_u8(key: &[u8]) -> Self {
+        DbKey { key: key.to_vec() }
+    }
+
+    fn as_slice<T, F: Fn(&[u8]) -> T>(&self, f: F) -> T {
+        f(&self.key[..])
+    }
+}
+
+fn test_db() {
+    use leveldb::database::Database;
+    use leveldb::kv::KV;
+    use leveldb::options::{Options, ReadOptions, WriteOptions};
+
+    let path = std::path::Path::new("/tmp/test");
+
+    let entry = TokenEntry {
+        value: Token::C('a'),
+        count: 0,
+    };
+
+    let mut options = Options::new();
+    options.create_if_missing = true;
+    let mut database: Database<DbKey> = match Database::open(path, options) {
+        Ok(db) => db,
+        Err(e) => {
+            panic!("failed to open database: {:?}", e)
+        }
+    };
+    let key = DbKey {
+        key: b"123".to_vec(),
+    };
+
+    let write_opts = WriteOptions::new();
+    let encoded: Vec<u8> = bincode::serialize(&entry).unwrap();
+    match database.put(write_opts, &key, &encoded) {
+        Ok(_) => (),
+        Err(e) => {
+            panic!("failed to write to database: {:?}", e)
+        }
+    };
+
+    let read_opts = ReadOptions::new();
+    let res = database.get(read_opts, &key);
+
+    match res {
+        Ok(data) => {
+            let data = data.unwrap();
+            let decoded: TokenEntry = bincode::deserialize(&data[..]).unwrap();
+            println!("Data retrieved: {:?}", &decoded);
+        }
+        Err(e) => {
+            panic!("failed reading data: {:?}", e)
+        }
+    }
+}
+
 impl TokenStash {
     fn new(prefix: &str) -> Self {
-        let prefix = prefix.to_string();
+        let mut options = Options::new();
+
+        options.create_if_missing = true;
+        let dbname = format!("{}/db", &prefix);
+
+        let path = std::path::Path::new(&dbname);
+
+        let mut database: Database<DbKey> = match Database::open(path, options) {
+            Ok(db) => db,
+            Err(e) => {
+                panic!("failed to open database: {:?}", e)
+            }
+        };
+
         TokenStash {
             rng: rand::thread_rng(),
-            prefix,
+            prefix: prefix.to_string(),
+            database,
             cache: HashMap::new(),
         }
     }
+
     fn tokenize(self: &Self, src: &str) -> Vec<Token> {
         src.chars().map(|x| Token::C(x)).collect()
     }
@@ -58,110 +144,43 @@ impl TokenStash {
         digest(&encoded[..])
     }
 
-    fn get_hash_file_name(self: &Self, v: &str) -> String {
-        let fname = format!("{}/{}/hash-{}.bin", &self.prefix, &v[0..3], &v[0..3]);
-        fname
-    }
-
-    fn read_hits_from_file(self: &Self, hash: &str) -> TokenHits {
+    fn read_hits_from_file(self: &mut Self, hash: &str) -> TokenHits {
         use std::fs::File;
 
-        let filename = self.get_hash_file_name(&hash);
+        let read_opts = ReadOptions::new();
+        let key = DbKey {
+            key: hash.as_bytes().to_vec(),
+        };
 
-        if let Ok(mut f) = File::open(&filename) {
-            let metadata = std::fs::metadata(&filename).expect("unable to read metadata");
-            let mut buffer = vec![0; metadata.len() as usize];
-            f.read(&mut buffer).expect("buffer overflow");
-            let decoded: TokenHitHash = bincode::deserialize(&buffer[..]).unwrap();
-            if let Some(decoded) = decoded.hits_by_hash.get(hash) {
-                decoded.clone()
-            } else {
-                TokenHits { entries: vec![] }
-            }
-        } else {
-            TokenHits { entries: vec![] }
-        }
-    }
+        let res = self.database.get(read_opts, &key);
 
-    fn flush_cache(&mut self) {
-        for (name, ht) in &self.cache {
-            self.save_hash_on_disk(&ht, &name);
-        }
-    }
-
-    fn get_random_cache_key(&mut self) -> String {
-        let klen = self.cache.keys().len();
-        let killkey = self.cache.keys().nth(self.rng.gen_range(0, klen)).unwrap();
-        killkey.clone()
-    }
-
-    fn save_hash(&mut self, hashtable: &TokenHitHash, filename: &str) {
-        let klen = self.cache.keys().len();
-        if klen > 1000 {
-            let killkey = self.get_random_cache_key();
-            info!("flushing key {}", &killkey);
-            if let Some(hash) = self.cache.get(&killkey) {
-                self.save_hash_on_disk(&hash, &killkey);
-            }
-            self.cache.remove(&killkey);
-        }
-        self.cache.insert(filename.to_string(), hashtable.clone());
-    }
-    fn save_hash_on_disk(self: &Self, hashtable: &TokenHitHash, filename: &str) {
-        let encoded: Vec<u8> = bincode::serialize(&hashtable).unwrap();
-
-        // Create all the directories in the path if they don't exist
-        if let Some(parent_dir) = std::path::Path::new(&filename).parent() {
-            if !parent_dir.exists() {
-                if let Err(err) = std::fs::create_dir_all(parent_dir) {
-                    eprintln!("Failed to create directories: {}", err);
-                    return;
+        match res {
+            Ok(data) => {
+                if let Some(data) = data {
+                    let decoded: TokenHits = bincode::deserialize(&data[..]).unwrap();
+                    decoded
+                } else {
+                    TokenHits { entries: vec![] }
                 }
             }
-        }
-
-        let mut file = match std::fs::File::create(filename) {
-            Ok(file) => file,
-            Err(err) => {
-                eprintln!("Failed to open file: {}", err);
-                return;
+            Err(e) => {
+                panic!("failed reading data: {:?}", e)
             }
-        };
-
-        // Write to the file
-        if let Err(err) = file.write_all(&encoded) {
-            eprintln!("Failed to write to file: {}", err);
-            return;
         }
-    }
-
-    fn read_hash(&mut self, filename: &str) -> TokenHitHash {
-        if let Some(hashtable) = self.cache.get(filename) {
-            return hashtable.clone();
-        }
-        let mut hashtable: TokenHitHash = if let Ok(mut f) = File::open(&filename) {
-            let metadata = std::fs::metadata(&filename).expect("unable to read metadata");
-            let mut buffer = vec![0; metadata.len() as usize];
-            f.read(&mut buffer).expect("buffer overflow");
-            let decoded: TokenHitHash = bincode::deserialize(&buffer[..]).unwrap();
-            decoded
-        } else {
-            Default::default()
-        };
-        self.cache.insert(filename.to_string(), hashtable.clone());
-        hashtable
     }
 
     fn write_hits_to_file(&mut self, hits: &TokenHits, hash: &str) {
-        let filename = self.get_hash_file_name(&hash);
-
-        let mut hashtable = self.read_hash(&filename);
-
-        hashtable
-            .hits_by_hash
-            .insert(hash.to_string(), hits.clone());
-
-        self.save_hash(&hashtable, &filename);
+        let key = DbKey {
+            key: hash.as_bytes().to_vec(),
+        };
+        let write_opts = WriteOptions::new();
+        let encoded: Vec<u8> = bincode::serialize(&hits).unwrap();
+        match self.database.put(write_opts, &key, &encoded) {
+            Ok(_) => (),
+            Err(e) => {
+                panic!("failed to write to database: {:?}", e)
+            }
+        };
     }
 
     fn note_next_token(&mut self, current: &[Token], next: &Token) {
@@ -187,7 +206,7 @@ impl TokenStash {
         self.write_hits_to_file(&hits, &hash);
     }
 
-    fn get_next_candidates(&self, current: &[Token]) -> Vec<TokenEntry> {
+    fn get_next_candidates(&mut self, current: &[Token]) -> Vec<TokenEntry> {
         let mut v: Vec<TokenEntry> = vec![];
         let hash = self.hash_tokens(current);
         debug!("input: {:?} hash: {}", &current, &hash);
@@ -219,7 +238,7 @@ impl TokenStash {
         }
     }
 
-    fn predict_token(&self, input: &str) -> Vec<TokenEntry> {
+    fn predict_token(&mut self, input: &str) -> Vec<TokenEntry> {
         let input_tokenized = self.tokenize(&input);
         let cand = self.get_next_candidates(&input_tokenized);
         debug!("Candidates for {:?} : {:?}", &input_tokenized, &cand);
@@ -230,7 +249,7 @@ impl TokenStash {
         v
     }
 
-    fn predict_all_string(&self, input: &str, context: usize) {
+    fn predict_all_string(&mut self, input: &str, context: usize) {
         for i in (0..context).rev() {
             if input.len() > i {
                 let v = self.predict_token(&input[input.len() - 1 - i..]);
@@ -296,9 +315,11 @@ fn main() {
         "generate" => {
             stash.generate(&std::env::args().nth(2).unwrap(), 64);
         }
+        "test" => {
+            test_db();
+        }
         x => {
             panic!("{} is not a valid operation", x);
         }
     }
-    stash.flush_cache();
 }
