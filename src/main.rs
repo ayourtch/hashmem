@@ -8,16 +8,11 @@ use sha256::{digest, try_digest};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 
-use db_key;
-
-extern crate leveldb;
-
 #[macro_use]
 extern crate log;
 
-use leveldb::database::Database;
-use leveldb::kv::KV;
-use leveldb::options::{Options, ReadOptions, WriteOptions};
+use redb::{Database, ReadableTable, TableDefinition};
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 enum Token {
@@ -41,88 +36,65 @@ struct TokenHitHash {
     hits_by_hash: HashMap<String, TokenHits>,
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
-struct DbKey {
-    key: Vec<u8>,
-}
-
 struct TokenStash {
     prefix: String,
-    database: Database<DbKey>,
+    database: Database,
     cache: HashMap<String, TokenHitHash>,
     rng: rand::ThreadRng,
 }
 
-impl db_key::Key for DbKey {
-    fn from_u8(key: &[u8]) -> Self {
-        DbKey { key: key.to_vec() }
-    }
-
-    fn as_slice<T, F: Fn(&[u8]) -> T>(&self, f: F) -> T {
-        f(&self.key[..])
-    }
-}
-
 fn test_db() {
-    use leveldb::database::Database;
-    use leveldb::kv::KV;
-    use leveldb::options::{Options, ReadOptions, WriteOptions};
+    const TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("test_table");
 
-    let path = std::path::Path::new("/tmp/test");
+    let path = "/tmp/test_redb";
 
     let entry = TokenEntry {
         value: Token::C('a'),
         count: 0,
     };
 
-    let mut options = Options::new();
-    options.create_if_missing = true;
-    options.cache = Some(leveldb::database::cache::Cache::new(1024*1024));
-    options.compression = leveldb_sys::Compression::Snappy;
-    let mut database: Database<DbKey> = match Database::open(path, options) {
-        Ok(db) => db,
-        Err(e) => {
-            panic!("failed to open database: {:?}", e)
-        }
-    };
-    let key = DbKey {
-        key: b"123".to_vec(),
-    };
+    // Create parent directory if it doesn't exist
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
 
-    let write_opts = WriteOptions::new();
-    let encoded: Vec<u8> = bincode::serialize(&entry).unwrap();
-    match database.put(write_opts, &key, &encoded) {
-        Ok(_) => (),
-        Err(e) => {
-            panic!("failed to write to database: {:?}", e)
-        }
-    };
+    let db = Database::create(path).unwrap();
+    
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        let encoded: Vec<u8> = bincode::serialize(&entry).unwrap();
+        let key: &[u8] = b"123";
+        table.insert(key, encoded.as_slice()).unwrap();
+    }
+    write_txn.commit().unwrap();
 
-    let read_opts = ReadOptions::new();
-    let res = database.get(read_opts, &key);
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    let key: &[u8] = b"123";
+    let res = table.get(key).unwrap();
 
     match res {
-        Ok(data) => {
-            let data = data.unwrap();
-            let decoded: TokenEntry = bincode::deserialize(&data[..]).unwrap();
+        Some(data) => {
+            let decoded: TokenEntry = bincode::deserialize(data.value()).unwrap();
             println!("Data retrieved: {:?}", &decoded);
         }
-        Err(e) => {
-            panic!("failed reading data: {:?}", e)
+        None => {
+            panic!("No data found")
         }
     }
 }
 
 impl TokenStash {
     fn new(prefix: &str) -> Self {
-        let mut options = Options::new();
-
-        options.create_if_missing = true;
         let dbname = format!("{}/db", &prefix);
-
-        let path = std::path::Path::new(&dbname);
-
-        let mut database: Database<DbKey> = match Database::open(path, options) {
+        
+        // Create parent directory if it doesn't exist
+        if let Some(parent) = std::path::Path::new(&dbname).parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        
+        let database = match Database::create(&dbname) {
             Ok(db) => db,
             Err(e) => {
                 panic!("failed to open database: {:?}", e)
@@ -147,42 +119,40 @@ impl TokenStash {
     }
 
     fn read_hits_from_file(self: &mut Self, hash: &str) -> TokenHits {
-        use std::fs::File;
-
-        let read_opts = ReadOptions::new();
-        let key = DbKey {
-            key: hash.as_bytes().to_vec(),
-        };
-
-        let res = self.database.get(read_opts, &key);
-
-        match res {
-            Ok(data) => {
-                if let Some(data) = data {
-                    let decoded: TokenHits = bincode::deserialize(&data[..]).unwrap();
-                    decoded
-                } else {
-                    TokenHits { entries: vec![] }
+        const TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("token_hits");
+        
+        let read_txn = self.database.begin_read().unwrap();
+        let table = read_txn.open_table(TABLE);
+        
+        match table {
+            Ok(table) => {
+                match table.get(hash).unwrap() {
+                    Some(data) => {
+                        let decoded: TokenHits = bincode::deserialize(data.value()).unwrap();
+                        decoded
+                    }
+                    None => {
+                        TokenHits { entries: vec![] }
+                    }
                 }
             }
-            Err(e) => {
-                panic!("failed reading data: {:?}", e)
+            Err(_) => {
+                // Table doesn't exist yet
+                TokenHits { entries: vec![] }
             }
         }
     }
 
     fn write_hits_to_file(&mut self, hits: &TokenHits, hash: &str) {
-        let key = DbKey {
-            key: hash.as_bytes().to_vec(),
-        };
-        let write_opts = WriteOptions::new();
-        let encoded: Vec<u8> = bincode::serialize(&hits).unwrap();
-        match self.database.put(write_opts, &key, &encoded) {
-            Ok(_) => (),
-            Err(e) => {
-                panic!("failed to write to database: {:?}", e)
-            }
-        };
+        const TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("token_hits");
+        
+        let write_txn = self.database.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(TABLE).unwrap();
+            let encoded: Vec<u8> = bincode::serialize(&hits).unwrap();
+            table.insert(hash, encoded.as_slice()).unwrap();
+        }
+        write_txn.commit().unwrap();
     }
 
     fn note_next_token(&mut self, current: &[Token], next: &Token) {
