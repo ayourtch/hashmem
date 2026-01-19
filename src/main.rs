@@ -12,7 +12,6 @@ use std::io::{Read, Write};
 extern crate log;
 
 use redb::{Database, ReadableTable, TableDefinition};
-use std::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Encode, Decode)]
 enum Token {
@@ -205,9 +204,65 @@ impl TokenStash {
     }
 
     fn note_text(&mut self, input: &str, context: usize) {
+        let total = input.len();
+        let mut batch: HashMap<String, TokenHits> = HashMap::new();
+        
+        // Collect all updates in memory
         for i in 2..input.len() {
-            self.note_all_string(&input[0..i], context);
+            for j in 0..context {
+                if i > 1 + j {
+                    let end = i;
+                    let start = i - 2 - j;
+                    if start < end {
+                        let substring = &input[start..end];
+                        let tokenized = self.tokenize(substring);
+                        if tokenized.len() >= 1 {
+                            let current = &tokenized[0..tokenized.len() - 1];
+                            let next = &tokenized[tokenized.len() - 1];
+                            let hash = self.hash_tokens(current);
+                            
+                            let hits = batch.entry(hash.clone()).or_insert_with(|| {
+                                self.read_hits_from_file(&hash)
+                            });
+                            
+                            let mut found = false;
+                            for e in &mut hits.entries {
+                                if &e.value == next {
+                                    e.count += 1;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if !found {
+                                let entry = TokenEntry {
+                                    value: next.clone(),
+                                    count: 1,
+                                };
+                                hits.entries.push(entry);
+                            }
+                        }
+                    }
+                }
+            }
+            if i % 100 == 0 {
+                eprint!("\rProgress: {}/{} characters noted ({}%)", i, total, (i * 100) / total);
+            }
         }
+        
+        // Write all updates in a single transaction
+        let write_txn = self.database.begin_write().unwrap();
+        {
+            const TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("token_hits");
+            let mut table = write_txn.open_table(TABLE).unwrap();
+            
+            for (hash, hits) in &batch {
+                let encoded: Vec<u8> = bincode::encode_to_vec(&hits, bincode::config::standard()).unwrap();
+                table.insert(hash.as_str(), encoded.as_slice()).unwrap();
+            }
+        }
+        write_txn.commit().unwrap();
+        
+        eprintln!(); // New line after progress completes
     }
 
     fn predict_token(&mut self, input: &str) -> Vec<TokenEntry> {
