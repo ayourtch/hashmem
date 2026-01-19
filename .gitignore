@@ -1,1 +1,8 @@
+# Build artifacts
 target/
+
+# Application data
+data/
+
+# Temporary output files
+.apchat-large-outputs/
