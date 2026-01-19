@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 serde = { version = "*", features = ["derive" ] }
 sha256 = "*"
-bincode = "*"
+bincode = { version = "2", features = ["serde"] }
 log = "*"
 env_logger = "*"
 rand = "*"

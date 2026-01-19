@@ -1,4 +1,4 @@
-use bincode;
+use bincode::{Decode, Encode};
 use rand;
 use rand::Rng;
 use std::fs::File;
@@ -14,19 +14,19 @@ extern crate log;
 use redb::{Database, ReadableTable, TableDefinition};
 use std::sync::Mutex;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Encode, Decode)]
 enum Token {
     C(char),
     Num(u64),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Encode, Decode)]
 struct TokenEntry {
     value: Token,
     count: u64,
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 struct TokenHits {
     entries: Vec<TokenEntry>,
 }
@@ -63,7 +63,7 @@ fn test_db() {
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(TABLE).unwrap();
-        let encoded: Vec<u8> = bincode::serialize(&entry).unwrap();
+        let encoded: Vec<u8> = bincode::encode_to_vec(&entry, bincode::config::standard()).unwrap();
         let key: &[u8] = b"123";
         table.insert(key, encoded.as_slice()).unwrap();
     }
@@ -76,7 +76,7 @@ fn test_db() {
 
     match res {
         Some(data) => {
-            let decoded: TokenEntry = bincode::deserialize(data.value()).unwrap();
+            let (decoded, _): (TokenEntry, usize) = bincode::decode_from_slice(data.value(), bincode::config::standard()).unwrap();
             println!("Data retrieved: {:?}", &decoded);
         }
         None => {
@@ -114,7 +114,7 @@ impl TokenStash {
     }
 
     fn hash_tokens(self: &Self, src: &[Token]) -> String {
-        let encoded: Vec<u8> = bincode::serialize(&src).unwrap();
+        let encoded: Vec<u8> = bincode::encode_to_vec(&src, bincode::config::standard()).unwrap();
         digest(&encoded[..])
     }
 
@@ -128,7 +128,7 @@ impl TokenStash {
             Ok(table) => {
                 match table.get(hash).unwrap() {
                     Some(data) => {
-                        let decoded: TokenHits = bincode::deserialize(data.value()).unwrap();
+                        let (decoded, _): (TokenHits, usize) = bincode::decode_from_slice(data.value(), bincode::config::standard()).unwrap();
                         decoded
                     }
                     None => {
@@ -149,7 +149,7 @@ impl TokenStash {
         let write_txn = self.database.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(TABLE).unwrap();
-            let encoded: Vec<u8> = bincode::serialize(&hits).unwrap();
+            let encoded: Vec<u8> = bincode::encode_to_vec(&hits, bincode::config::standard()).unwrap();
             table.insert(hash, encoded.as_slice()).unwrap();
         }
         write_txn.commit().unwrap();

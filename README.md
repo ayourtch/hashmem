@@ -1,6 +1,6 @@
 # HashMem
 
-A character-level language model using RedDB for storage and SHA-256 hashing for context.
+A character-level language model using RedDB for storage, SHA-256 hashing for context, and bincode 2.0 for serialization.
 
 ## Overview
 
@@ -130,7 +130,7 @@ The model stores its database in the `data/db` directory by default. The databas
 
 - `serde`: Serialization/deserialization support with derive macros
 - `sha256`: SHA-256 hashing for token sequences
-- `bincode`: Binary serialization for efficient storage
+- `bincode`: 2.0 - Modern binary serialization for efficient storage with explicit configuration
 - `log`/`env_logger`: Logging support (set `RUST_LOG=debug` for debug output)
 - `rand`: Random number generation for sampling during text generation
 - `redb`: Pure-Rust key-value storage with ACID transactions
@@ -189,10 +189,20 @@ Contributions are welcome! Please feel free to submit a Pull Report.
 
 ## Migration Notes
 
-This version has been migrated from LevelDB to RedDB. Key changes:
+This version has been migrated from LevelDB to RedDB and upgraded from bincode 1.0 to 2.0.
+
+### Database Migration (LevelDB → RedDB)
 - Pure Rust implementation (no C++ dependencies)
 - Explicit transaction model
 - Better type safety with compile-time table definitions
 - Improved performance and reliability
+
+### Serialization Migration (bincode 1.0 → 2.0)
+- Explicit configuration with `bincode::config::standard()`
+- Better compile-time guarantees with `Encode`/`Decode` derives
+- Improved error messages and performance
+- `decode_from_slice` returns `(T, usize)` tuple
+
+**Important:** Both the database format and serialization format are incompatible with previous versions. Existing databases and data must be rebuilt from scratch.
 
 See `MIGRATION_SUMMARY.md` for detailed migration information.
